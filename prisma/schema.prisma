@@ -1,0 +1,194 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = "postgresql://newtonite:newtonite_dev@localhost:5432/newtonite"
+}
+
+// ─── Users ───────────────────────────────────────────────────────────
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @db.VarChar(200)
+  email     String   @unique @db.VarChar(320)
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  teamMemberships TeamMembership[]
+  assignedItems   WorkItem[]       @relation("assignee")
+  createdItems    WorkItem[]       @relation("creator")
+  comments        Comment[]
+  activityEvents  ActivityEvent[]
+
+  @@map("users")
+}
+
+// ─── Teams ───────────────────────────────────────────────────────────
+
+model Team {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique @db.VarChar(200)
+  description String?  @db.Text
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  memberships TeamMembership[]
+  workItems   WorkItem[]
+
+  @@map("teams")
+}
+
+enum TeamRole {
+  VIEWER
+  MEMBER
+  MANAGER
+}
+
+model TeamMembership {
+  userId String   @map("user_id") @db.Uuid
+  teamId String   @map("team_id") @db.Uuid
+  role   TeamRole @default(MEMBER)
+
+  user User @relation(fields: [userId], references: [id])
+  team Team @relation(fields: [teamId], references: [id])
+
+  @@id([userId, teamId])
+  @@index([teamId])
+  @@map("team_memberships")
+}
+
+// ─── Work Items ──────────────────────────────────────────────────────
+
+enum WorkItemStatus {
+  OPEN
+  IN_PROGRESS
+  PENDING_APPROVAL
+  RESOLVED
+  CANCELLED
+}
+
+enum WorkItemPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+/// Sequence table for human-readable references (OPS-1001, OPS-1002, ...)
+model WorkItemSequence {
+  id      Int @id @default(autoincrement())
+  /// Starts at 1000 via seed to produce OPS-1001+
+  
+  @@map("work_item_sequence")
+}
+
+model WorkItem {
+  id          String           @id @default(uuid()) @db.Uuid
+  reference   String           @unique @db.VarChar(20)
+  title       String           @db.VarChar(250)
+  description String?          @db.Text
+  status      WorkItemStatus   @default(OPEN)
+  priority    WorkItemPriority @default(MEDIUM)
+  version     Int              @default(1)
+  teamId      String           @map("team_id") @db.Uuid
+  assigneeId  String?          @map("assignee_id") @db.Uuid
+  createdById String           @map("created_by_id") @db.Uuid
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+  resolvedAt  DateTime?        @map("resolved_at")
+
+  team      Team   @relation(fields: [teamId], references: [id])
+  assignee  User?  @relation("assignee", fields: [assigneeId], references: [id])
+  createdBy User   @relation("creator", fields: [createdById], references: [id])
+
+  comments       Comment[]
+  activityEvents ActivityEvent[]
+
+  // ─── Access pattern indexes ────────────────────────────
+  @@index([teamId, status], name: "idx_work_items_team_status")
+  @@index([teamId, updatedAt(sort: Desc)], name: "idx_work_items_team_updated")
+  @@index([assigneeId, status], name: "idx_work_items_assignee_status")
+  @@index([priority, status], name: "idx_work_items_priority_status")
+  @@index([updatedAt(sort: Desc)], name: "idx_work_items_updated")
+  @@index([status], name: "idx_work_items_status")
+  @@map("work_items")
+}
+
+// ─── Comments ────────────────────────────────────────────────────────
+
+model Comment {
+  id         String   @id @default(uuid()) @db.Uuid
+  workItemId String   @map("work_item_id") @db.Uuid
+  authorId   String   @map("author_id") @db.Uuid
+  body       String   @db.Text
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  workItem WorkItem @relation(fields: [workItemId], references: [id])
+  author   User     @relation(fields: [authorId], references: [id])
+
+  @@index([workItemId, createdAt], name: "idx_comments_work_item_created")
+  @@map("comments")
+}
+
+// ─── Activity / Audit Events ─────────────────────────────────────────
+
+model ActivityEvent {
+  id         String   @id @default(uuid()) @db.Uuid
+  workItemId String   @map("work_item_id") @db.Uuid
+  actorId    String   @map("actor_id") @db.Uuid
+  eventType  String   @map("event_type") @db.VarChar(50)
+  metadata   Json     @default("{}")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  workItem WorkItem @relation(fields: [workItemId], references: [id])
+  actor    User     @relation(fields: [actorId], references: [id])
+
+  @@index([workItemId, createdAt(sort: Desc)], name: "idx_activity_work_item_created")
+  @@map("activity_events")
+}
+
+// ─── Idempotency ─────────────────────────────────────────────────────
+
+model IdempotencyRecord {
+  id             String   @id @default(uuid()) @db.Uuid
+  key            String   @db.VarChar(255)
+  userId         String   @map("user_id") @db.Uuid
+  endpoint       String   @db.VarChar(200)
+  requestHash    String   @map("request_hash") @db.VarChar(64)
+  responseStatus Int      @map("response_status")
+  responseBody   Json     @map("response_body")
+  createdAt      DateTime @default(now()) @map("created_at")
+  expiresAt      DateTime @map("expires_at")
+
+  @@unique([key, userId], name: "uq_idempotency_key_user")
+  @@index([expiresAt], name: "idx_idempotency_expires")
+  @@map("idempotency_records")
+}
+
+// ─── Transactional Outbox ────────────────────────────────────────────
+
+enum OutboxStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+model OutboxEvent {
+  id            String       @id @default(uuid()) @db.Uuid
+  eventType     String       @map("event_type") @db.VarChar(100)
+  aggregateType String       @map("aggregate_type") @db.VarChar(100)
+  aggregateId   String       @map("aggregate_id") @db.Uuid
+  payload       Json
+  status        OutboxStatus @default(PENDING)
+  attempts      Int          @default(0)
+  availableAt   DateTime     @default(now()) @map("available_at")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  processedAt   DateTime?    @map("processed_at")
+  lastError     String?      @map("last_error") @db.Text
+
+  @@index([status, availableAt], name: "idx_outbox_status_available")
+  @@map("outbox_events")
+}
